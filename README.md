@@ -1,22 +1,21 @@
 #Social Harvest (harvester)
-[![Gitter chat](https://badges.gitter.im/SocialHarvest/harvester.png)](https://gitter.im/SocialHarvest/harvester) [![Build Status](https://drone.io/github.com/SocialHarvest/harvester/status.png)](https://drone.io/github.com/SocialHarvest/harvester/latest) [![Coverage Status](https://coveralls.io/repos/SocialHarvest/harvester/badge.png?branch=master)](https://coveralls.io/r/SocialHarvest/harvester?branch=master) [![Stories in Ready](https://badge.waffle.io/socialharvest/harvester.png?label=ready&title=Ready)](https://waffle.io/socialharvest/harvester)
+[![wercker status](https://app.wercker.com/status/f2922c2bb4a25b6c5adc65ae41b751bb/s "wercker status")](https://app.wercker.com/project/bykey/f2922c2bb4a25b6c5adc65ae41b751bb) [![Coverage Status](https://coveralls.io/repos/SocialHarvest/harvester/badge.png?branch=master)](https://coveralls.io/r/SocialHarvest/harvester?branch=master)
 
 http://www.socialharvest.io
 
-Harvests data from Twitter, Facebook, etc. using Go and concurrently stores to a variety of data stores.
-Social Harvest also logs to disk and those log files can be used by programs like Fluentd for additional 
-flexibility in your data store and workflow.
+Social Harvest is a scalable and flexible open-source social media analytics platform.
 
-In addition to harvesting and storing, data can also be retrieved through an API that comes with Social Harvest.
-Of course, a separate stand alone integration is also possible since data was stored where ever needed.
+There are three parts to the platform. This harvester, a reporter API, and the [Social Harvest Dashboard](https://github.com/SocialHarvest/dashboard) 
+for front-end visualizations and reporting through a web browser.
 
-For front-end visualizations using the harvested data, be sure to look at the [Social Harvest Dashboard](https://github.com/SocialHarvest/dashboard) project.
-
-This makes Social Harvest a scalable and completely flexible social media analytics platform suitable for any need.
+This application (harvester) gathers data from Twitter, Facebook, etc. using Go and concurrently stores to a variety of data stores.
+Social Harvest also logs to disk and those log files can be used by programs like Fluentd for additional flexibility in your data 
+store and workflow. In addition to harvesting and storing, the harvester configuration can also be accessed through an API that comes 
+with Social Harvest. 
 
 While Social Harvest&reg; is a registered trademark, this software is made publicly available under the GPLv3 license.
-"Powered by Social Harvest&reg;" on any rendered web pages (ie. in the footer) and within any documentation, promotional, or sales 
-materials would very much be appreciated.
+"Powered by Social Harvest&reg;" on any rendered web pages (ie. in the footer) and within any documentation, web sites, or other materials 
+would very much be appreciated since this is an open-source project.
 
 ## Configuration
 
@@ -31,7 +30,7 @@ track various accounts for growth.
 
 You will also need to provide your application API keys within this configuration file. There is (currently) no OAuth support within 
 the RESTful API server. All social media services have an access token you will be able to generate and use within Social Harvest. 
-You do not need a web browser to configure Social Harvest. Configurations are porable and can be deployed with each harvester.
+You do not need a web browser to configure Social Harvest. Configurations are portable and can be deployed with each harvester.
 
 Note: If you are working with the Social Harvest Dashboard and are developing locally with ```grunt dev``` then you will likely be
 running the dashboard on a Node.js server with a port of ```8881``` (by default) and you will need to configure CORS for that origin. 
@@ -39,35 +38,39 @@ You can add as many allowed origins as you like in the configuration.
 
 ## Installation
 
-First, you'll need Git, Mercurial and Bazaar since a few packages use those version control systems. On Ubuntu it's as easy as 
-```apt-get install git``` and ```apt-get install bzr``` and ```apt-get install mercurial```.
+Installation is pretty simple. You'll need to have Go installed and setup, then run: ```go get github.com/SocialHarvest/harvester``` 
 
-Installation is pretty simple. You'll need to have Go installed and with your $GOPATH set: ```go get github.com/SocialHarvest/harvester``` 
+Getting the Go packages this application uses is as simple as issueing a ```go get``` command before running or building. Every 3rd party 
+package Social Harvest uses has been "vendored" (or forked and available from github.com/SocialHarvestVendors). Even packages that came 
+from other revision control systems. So this means everything should be Git and from GitHub.
 
-The dependencies should be handled automatically but you may need to call ```go get```.
+The data files used for various machine learning and analysis purposes will automatically be copied into an ```sh-data``` directory. 
+This directory will be created next to the binary or the source (if you ran without building). The data will be downloaded, if it doesn't 
+exist in this directory already, each time the application starts. So if something goes wrong, feel free to remove this directory and restart
+the harvester application.
 
-You'll need to copy the ```data``` directory (and its contents) to be next to the program you run (the built binary, if you built one). 
-So if you build the harvester, ensure where ever you put the harvester binary, you have this data directory sitting in the same directory. 
-This will change in the future, but for now it contains the data sets for detecting gender.
+Why the file download? Because ultimately these files could be quite large and they might come from S3 and this process more or less 
+installs things for you so you don't need to go wrangling dependencies. This will become more robust over time. Plus, GitHub doesn't
+want us storing such large files and getting the actual packages would take forever.
 
-If you're using a SQL database, be sure to setup your tables using the SQL files in the ```scripts``` directory. It'll save you a lot of trouble. 
-However, these will change quite frequently during development until Social Harvest has a stable version released. So keep an eye on them.
+If you're harvesting into a Postgres database, be sure to setup your tables using the SQL files in the ```scripts/postgresql``` directory. 
+It'll save you a lot of trouble. However, these will change during development until Social Harvest has a stable version released. 
 
-All other dependencies (with the exception of testify, see below) should be obtained easily enough via ```go get```. Then to run Social Harvest before (or without) 
-building it (at the package src under your $GOPATH), you can issue the following command because there are multiple files in the main package (and you don't want to run the _test files):
+Then to run Social Harvest before (or without) building it (at the package src under your $GOPATH), you can issue the following command because 
+there are multiple files in the main package (and you don't want to run the _test files):
 
 ```
 go run main.go harvest.go
 ```
 
-Preferably, you'll just build a Social Harvest binary by running:
+Preferably, you'll just build and use a Social Harvest binary by running:
 
 ```
 go build
 ```
 
-You need not specify the files in this case. It will leave you with a ```harvester``` executable file. Run this. Once running, you should have an API server which 
-the Dashboard web application can talk to in order to visualize harvested data. Congratulation, you now have your own social media analytics platform!
+You need not specify the files in this case. It will leave you with a ```harvester``` executable file. Run this. Once configured and running, you should 
+have a pretty awesome social media data harvester. That is all the harvester is responsible for.
 
 ## Testing
 
@@ -90,17 +93,22 @@ per second, but we aren't going to have that many results from an API returned t
 
 Still, speed and concurrency are part of Social Harvest's goals.
 
-## Contributing
+## Contributing & Licensing
 
 Social Harvest is an open-source project and any community contributions are always appreciated. You can write blog posts, tutorials, help 
 with documentation, submit bug reports, feature requests, and even pull requests. It's all helpful.
 
 Please keep in mind that Social Harvest is open-source and any contributions must be compatible with the GPLv3 license. 
 It would also be very much appreciated if you put a "powered by Social Harvest" somewhere on your application/web site (ie. the footer). 
+You are free to make money from Social Harvest of course, but you aren't free to modify the source directly and squirrel it away. Sharing is caring. 
+If you have proprietary stuff, keep it outside of the Social Harvest package/binary. Social Harvest is designed to gather data on its own 
+and not get in the way of other applications.
+
+If GPLv3 does not work for you or your organization, please feel free to get in touch about other commercial licensing options.    
 
 ### Bug Reporting
 Before submitting any bugs, please be sure to check the [issues list in GitHub](https://github.com/SocialHarvest/harvester/issues?state=open) first. 
-Please be sure to provide necessary information with any bugs as it will help expidite the process of fixing them.
+Please be sure to provide necessary information with any bugs as it will help expidite the process of fixing them. Operating system, version of Go, etc.
 
 ### Feature Requests
 If you'd like to see a feature implemented in Social Harvest, again first check the issues looking for [feature requests](https://github.com/SocialHarvest/harvester/issues?labels=feature+request&page=1&state=open) to ensure someone else hasn't already suggested it (feel free to +1 away in the comments).

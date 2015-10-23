@@ -18,9 +18,8 @@ package harvester
 
 import (
 	"github.com/SocialHarvest/harvester/lib/config"
-	geohash "github.com/TomiHiltunen/geohash-golang"
-	"github.com/google/go-querystring/query"
-	"github.com/tmaiaroto/geocoder"
+	geohash "github.com/SocialHarvestVendors/geohash-golang"
+	"github.com/SocialHarvestVendors/go-querystring/query"
 	//"github.com/mitchellh/mapstructure"
 	"bytes"
 	"encoding/json"
@@ -234,17 +233,20 @@ func FacebookPostsOut(posts []FacebookPost, territoryName string, params Faceboo
 
 			// Reverse code to get city, state, country, etc.
 			var contributorCountry = ""
-			var contributorState = ""
+			var contributorRegion = ""
 			var contributorCity = ""
-			var contributorCounty = ""
+			var contributorCityPopulation = int32(0)
+			// This isn't always available with Geobed information and while many counties will be, they still need to be decoded with the Geonames data set (id numbers to string names).
+			// When Geobed updates, then Social Harvest can add county information in again. "State" (US state) has also changed to "Region" due to the data sets being used.
+			// A little consistency has been lost, but geocoding is all internal now. Not a bad trade off.
+			// var contributorCounty = ""
 			if contributor.Location.Latitude != 0.0 && contributor.Location.Latitude != 0.0 {
-				reverseLocation, geoErr := geocoder.ReverseGeocode(contributor.Location.Latitude, contributor.Location.Longitude)
-				if geoErr == nil {
-					contributorState = reverseLocation.State
-					contributorCity = reverseLocation.City
-					contributorCountry = reverseLocation.CountryCode
-					contributorCounty = reverseLocation.County
-				}
+				reverseLocation := services.geocoder.ReverseGeocode(contributor.Location.Latitude, contributor.Location.Longitude)
+				contributorRegion = reverseLocation.Region
+				contributorCity = reverseLocation.City
+				contributorCountry = reverseLocation.Country
+				contributorCityPopulation = reverseLocation.Population
+				// contributorCounty = reverseLocation.County
 			}
 
 			// Geohash
@@ -257,29 +259,30 @@ func FacebookPostsOut(posts []FacebookPost, territoryName string, params Faceboo
 			// TODO: Category (use a classifier in the future for this?)
 			// message row
 			messageRow := config.SocialHarvestMessage{
-				Time:                  postCreatedTime,
-				HarvestId:             harvestId,
-				Territory:             territoryName,
-				Network:               "facebook",
-				MessageId:             post.Id,
-				ContributorId:         post.From.Id,
-				ContributorScreenName: post.From.Name,
-				ContributorName:       contributorName,
-				ContributorGender:     contributorGender,
-				ContributorType:       contributorType,
-				ContributorLang:       LocaleToLanguageISO(contributor.Locale),
-				ContributorLongitude:  contributor.Location.Longitude,
-				ContributorLatitude:   contributor.Location.Latitude,
-				ContributorGeohash:    locationGeoHash,
-				ContributorCity:       contributorCity,
-				ContributorState:      contributorState,
-				ContributorCountry:    contributorCountry,
-				ContributorCounty:     contributorCounty,
-				ContributorLikes:      contributor.Likes,
-				Message:               post.Message,
-				FacebookShares:        post.Shares.Count,
-				Category:              contributor.Category,
-				IsQuestion:            Btoi(IsQuestion(post.Message, harvestConfig.QuestionRegex)),
+				Time:                      postCreatedTime,
+				HarvestId:                 harvestId,
+				Territory:                 territoryName,
+				Network:                   "facebook",
+				MessageId:                 post.Id,
+				ContributorId:             post.From.Id,
+				ContributorScreenName:     post.From.Name,
+				ContributorName:           contributorName,
+				ContributorGender:         contributorGender,
+				ContributorType:           contributorType,
+				ContributorLang:           LocaleToLanguageISO(contributor.Locale),
+				ContributorLongitude:      contributor.Location.Longitude,
+				ContributorLatitude:       contributor.Location.Latitude,
+				ContributorGeohash:        locationGeoHash,
+				ContributorCity:           contributorCity,
+				ContributorCityPopulation: contributorCityPopulation,
+				ContributorRegion:         contributorRegion,
+				ContributorCountry:        contributorCountry,
+				ContributorLikes:          contributor.Likes,
+				Message:                   post.Message,
+				FacebookShares:            post.Shares.Count,
+				Category:                  contributor.Category,
+				Sentiment:                 services.sentimentAnalyzer.Classify(post.Message),
+				IsQuestion:                Btoi(IsQuestion(post.Message, harvestConfig.QuestionRegex)),
 			}
 			StoreHarvestedData(messageRow)
 			LogJson(messageRow, "messages")
@@ -294,25 +297,25 @@ func FacebookPostsOut(posts []FacebookPost, territoryName string, params Faceboo
 
 						// Again, keyword share the same series/table/collection
 						hashtag := config.SocialHarvestHashtag{
-							Time:                  postCreatedTime,
-							HarvestId:             keywordHarvestId,
-							Territory:             territoryName,
-							Network:               "facebook",
-							MessageId:             post.Id,
-							ContributorId:         post.From.Id,
-							ContributorScreenName: post.From.Name,
-							ContributorName:       contributorName,
-							ContributorGender:     contributorGender,
-							ContributorType:       contributorType,
-							ContributorLang:       LocaleToLanguageISO(contributor.Locale),
-							ContributorLongitude:  contributor.Location.Longitude,
-							ContributorLatitude:   contributor.Location.Latitude,
-							ContributorGeohash:    locationGeoHash,
-							ContributorCity:       contributorCity,
-							ContributorState:      contributorState,
-							ContributorCountry:    contributorCountry,
-							ContributorCounty:     contributorCounty,
-							Keyword:               keyword,
+							Time:                      postCreatedTime,
+							HarvestId:                 keywordHarvestId,
+							Territory:                 territoryName,
+							Network:                   "facebook",
+							MessageId:                 post.Id,
+							ContributorId:             post.From.Id,
+							ContributorScreenName:     post.From.Name,
+							ContributorName:           contributorName,
+							ContributorGender:         contributorGender,
+							ContributorType:           contributorType,
+							ContributorLang:           LocaleToLanguageISO(contributor.Locale),
+							ContributorLongitude:      contributor.Location.Longitude,
+							ContributorLatitude:       contributor.Location.Latitude,
+							ContributorGeohash:        locationGeoHash,
+							ContributorCity:           contributorCity,
+							ContributorCityPopulation: contributorCityPopulation,
+							ContributorRegion:         contributorRegion,
+							ContributorCountry:        contributorCountry,
+							Keyword:                   keyword,
 						}
 						StoreHarvestedData(hashtag)
 						LogJson(hashtag, "hashtags")
@@ -324,30 +327,30 @@ func FacebookPostsOut(posts []FacebookPost, territoryName string, params Faceboo
 			// TODO: expand short urls (Facebook doesn't do it for us unfortunately)
 			if len(post.Link) > 0 {
 				sharedLinksRow := config.SocialHarvestSharedLink{
-					Time:                  postCreatedTime,
-					HarvestId:             harvestId,
-					Territory:             territoryName,
-					Network:               "facebook",
-					MessageId:             post.Id,
-					ContributorId:         post.From.Id,
-					ContributorScreenName: post.From.Name,
-					ContributorName:       contributorName,
-					ContributorGender:     contributorGender,
-					ContributorType:       contributorType,
-					ContributorLang:       LocaleToLanguageISO(contributor.Locale),
-					ContributorLongitude:  contributor.Location.Longitude,
-					ContributorLatitude:   contributor.Location.Latitude,
-					ContributorGeohash:    locationGeoHash,
-					ContributorCity:       contributorCity,
-					ContributorState:      contributorState,
-					ContributorCountry:    contributorCountry,
-					ContributorCounty:     contributorCounty,
-					Type:                  post.Type,
-					Preview:               post.Picture,
-					Source:                post.Source,
-					Url:                   post.Link,
-					ExpandedUrl:           ExpandUrl(post.Link),
-					Host:                  hostName,
+					Time:                      postCreatedTime,
+					HarvestId:                 harvestId,
+					Territory:                 territoryName,
+					Network:                   "facebook",
+					MessageId:                 post.Id,
+					ContributorId:             post.From.Id,
+					ContributorScreenName:     post.From.Name,
+					ContributorName:           contributorName,
+					ContributorGender:         contributorGender,
+					ContributorType:           contributorType,
+					ContributorLang:           LocaleToLanguageISO(contributor.Locale),
+					ContributorLongitude:      contributor.Location.Longitude,
+					ContributorLatitude:       contributor.Location.Latitude,
+					ContributorGeohash:        locationGeoHash,
+					ContributorCity:           contributorCity,
+					ContributorCityPopulation: contributorCityPopulation,
+					ContributorRegion:         contributorRegion,
+					ContributorCountry:        contributorCountry,
+					Type:                      post.Type,
+					Preview:                   post.Picture,
+					Source:                    post.Source,
+					Url:                       post.Link,
+					ExpandedUrl:               ExpandUrl(post.Link),
+					Host:                      hostName,
 				}
 				StoreHarvestedData(sharedLinksRow)
 				LogJson(sharedLinksRow, "shared_links")

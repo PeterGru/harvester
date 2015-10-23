@@ -21,10 +21,9 @@ import (
 	"flag"
 	"github.com/SocialHarvest/harvester/lib/config"
 	"github.com/SocialHarvest/harvester/lib/harvester"
-	"github.com/advancedlogic/GoOse"
-	"github.com/ant0ine/go-json-rest/rest"
+	"github.com/SocialHarvestVendors/color"
+	"github.com/SocialHarvestVendors/go-json-rest/rest"
 	"github.com/bugsnag/bugsnag-go"
-	"github.com/fatih/color"
 	"log"
 	"net/http"
 	//_ "net/http/pprof"
@@ -32,15 +31,13 @@ import (
 	"reflect"
 	"runtime"
 	"strconv"
-	"strings"
-	"time"
 )
 
+var appVersion = "0.16.1-alpha"
+var confFile string
 var socialHarvest = config.SocialHarvest{}
 
-var harvestChannel = make(chan interface{})
-
-// --------- Route functions (maybe move into various go files for organization)
+// --------- Route functions for the harvester API (which allows for the configuration of the harvester after it is up and running as well as various statistics about the harvester)
 
 // API: Shows the harvest schedule as currently configured
 func ShowSchedule(w rest.ResponseWriter, r *rest.Request) {
@@ -81,374 +78,101 @@ func ShowSocialHarvestConfig(w rest.ResponseWriter, r *rest.Request) {
 	res.Links["self"] = config.HypermediaLink{
 		Href: "/config/read",
 	}
+	res.Links["reload"] = config.HypermediaLink{
+		Href: "/config/reload{?original}",
+	}
+	res.Links["write"] = config.HypermediaLink{
+		Href: "/config/write",
+	}
 	res.Data["config"] = socialHarvest.Config.Harvest
 	res.Success()
 	w.WriteJson(res.End())
 }
 
-// --------- API: Territory end points ---------
+// Reloads the configuration from the available file on disk
+func ReloadSocialHarvestConfig(w rest.ResponseWriter, r *rest.Request) {
+	res := config.NewHypermediaResource()
+	res.Links["self"] = config.HypermediaLink{
+		Href: "/config/reload{?original}",
+	}
+	res.Links["read"] = config.HypermediaLink{
+		Href: "/config/read",
+	}
+	res.Links["write"] = config.HypermediaLink{
+		Href: "/config/write",
+	}
 
-// Territory aggregates (gender, language, etc.) shows a breakdown and count of various values and their percentage of total
-func TerritoryAggregateData(w rest.ResponseWriter, r *rest.Request) {
-	res := setTerritoryLinks("territory:aggregate")
-
-	territory := r.PathParam("territory")
-	series := r.PathParam("series")
+	// If the original configuration (passed via --conf flag or the default social-harvest-conf.json) is desired, pass true to setConfig() by looking
+	// for an "?original=true" in the route. By default, it will look for an updated config in the "sh-data" directory.
 	queryParams := r.URL.Query()
+	original := false
+	if len(queryParams["original"]) > 0 {
+		original = true
+		res.Meta.Message = "Original configuration loaded."
+	}
+	setConfig(original)
 
-	timeFrom := ""
-	if len(queryParams["from"]) > 0 {
-		timeFrom = queryParams["from"][0]
-	}
-	timeTo := ""
-	if len(queryParams["to"]) > 0 {
-		timeTo = queryParams["to"][0]
-	}
-	network := ""
-	if len(queryParams["network"]) > 0 {
-		timeTo = queryParams["network"][0]
-	}
+	// Return the updated config
+	res.Data["config"] = socialHarvest.Config.Harvest
+	res.Success()
+	w.WriteJson(res.End())
+}
 
-	limit := 0
-	if len(queryParams["limit"]) > 0 {
-		parsedLimit, err := strconv.Atoi(queryParams["limit"][0])
-		if err == nil {
-			limit = parsedLimit
-		}
+// Writes a new JSON configuration file into "sh-data" (a reload should be called afer this unless there's an error) so that the original is preserved
+func WriteSocialHarvestConfig(w rest.ResponseWriter, r *rest.Request) {
+	res := config.NewHypermediaResource()
+	res.Links["self"] = config.HypermediaLink{
+		Href: "/config/write",
 	}
-
-	fields := []string{}
-	if len(queryParams["fields"]) > 0 {
-		fields = strings.Split(queryParams["fields"][0], ",")
-		// trim any white space
-		for i, val := range fields {
-			fields[i] = strings.Trim(val, " ")
-		}
+	res.Links["read"] = config.HypermediaLink{
+		Href: "/config/read",
+	}
+	res.Links["reload"] = config.HypermediaLink{
+		Href: "/config/reload{?original}",
 	}
 
-	if territory != "" && series != "" && len(fields) > 0 {
-		params := config.CommonQueryParams{
-			Series:    series,
-			Territory: territory,
-			Network:   network,
-			From:      timeFrom,
-			To:        timeTo,
-			Limit:     uint(limit),
-		}
+	// TODO: Take JSON from request and create new SocialHarvestConf struct with it.
+	// Then save to disk in "sh-data" path.
+	// Validate it? Aside from being able to convert it to a struct... Make sure it has a certain number of fields?
 
-		var total config.ResultCount
-		res.Data["aggregate"], total = socialHarvest.Database.FieldCounts(params, fields)
-		res.Data["total"] = total.Count
+	var c = config.SocialHarvestConf{}
+	err := r.DecodeJsonPayload(&c)
+	if err != nil {
+		//rest.Error(w, err.Error(), http.StatusInternalServerError)
+		//return
+		res.Meta.Message = "Invalid configuration."
+		w.WriteJson(res.End())
+	}
+	if config.SaveConfig(c) {
 		res.Success()
 	}
 
 	w.WriteJson(res.End())
 }
 
-// This works practically the same way as TerritoryAggregateData, only instead it is a streaming API response that returns multiple slices of time.
-// This makes light work of a potential mount of data and streams the response back to the client for progressive loading. For example, a time series
-// graph can be drawn using JavaScript in an animated sort of fashion. As more data came in, the chart would change. For smaller ranges this should
-// return quite quickly and perhaps not even be necessary...But for large date ranges (or lots of data) this could work around performance issues.
-// Alternative to this, would be storing aggregate report data in a database somewhere, but that limits the use of the "resolution" option.
-// This method makes for greater flexibility and less database storage. Though it may need to be re-evaluated in the future if there proves to be
-// too much data, resulting in slow loads.
-// NOTE: This returns sparse data and an aggregate count of all field values, so it may be difficult to parse on the front-end.
-func TerritoryTimeSeriesAggregateData(w rest.ResponseWriter, r *rest.Request) {
-	territory := r.PathParam("territory")
-	series := r.PathParam("series")
-	queryParams := r.URL.Query()
-
-	timeFrom := ""
-	if len(queryParams["from"]) > 0 {
-		timeFrom = queryParams["from"][0]
-	}
-	timeTo := ""
-	if len(queryParams["to"]) > 0 {
-		timeTo = queryParams["to"][0]
-	}
-	network := ""
-	if len(queryParams["network"]) > 0 {
-		network = queryParams["network"][0]
+// Returns information about the currently configured database, if it's reachable, etc.
+func DatabaseInfo(w rest.ResponseWriter, r *rest.Request) {
+	res := config.NewHypermediaResource()
+	res.Links["database:info"] = config.HypermediaLink{
+		Href: "/database/info",
 	}
 
-	// likely not used here
-	limit := 0
-	if len(queryParams["limit"]) > 0 {
-		parsedLimit, err := strconv.Atoi(queryParams["limit"][0])
-		if err == nil {
-			limit = parsedLimit
-		}
+	if socialHarvest.Database.Postgres != nil {
+		res.Data["type"] = "postgres"
+		// SELECT * FROM has_database_privilege('username', 'database', 'connect');
+		// var r struct {
+		// 	hasAccess string `db:"has_database_privilege" json:"has_database_privilege"`
+		// }
+		//err := socialHarvest.Database.Postgres.Get(&r, "SELECT * FROM has_database_privilege("+socialHarvest.Config.Database.User+", "+socialHarvest.Config.Database.Database+", 'connect')")
+		//res.Data["r"] = r
+		//res.Data["err"] = err
+		res.Data["hasAccess"] = socialHarvest.Database.HasAccess()
 	}
 
-	// in minutes
-	resolution := 0
-	if len(queryParams["resolution"]) > 0 {
-		parsedResolution, err := strconv.Atoi(queryParams["resolution"][0])
-		if err == nil {
-			resolution = parsedResolution
-		}
-	}
-	// TODO: limit the resolution? 5, 10, 15, 30, 45, 60, 180, 1440 etc.? (minutes, hour, 3 hours, day, etc.)
-	// TODO: maybe also add timezone? (this would require changes all over to date picker, other queries, etc.)
-
-	fields := []string{}
-	if len(queryParams["fields"]) > 0 {
-		fields = strings.Split(queryParams["fields"][0], ",")
-		// trim any white space
-		for i, val := range fields {
-			fields[i] = strings.Trim(val, " ")
-		}
-	}
-
-	//log.Println(resolution)
-	if resolution != 0 && territory != "" && series != "" && len(fields) > 0 {
-		// only accepting days for now - not down to minutes or hours (yet)
-		tF, _ := time.Parse("2006-01-02", timeFrom)
-		tT, _ := time.Parse("2006-01-02", timeTo)
-
-		timeRange := tT.Sub(tF)
-		//totalRangeMinutes := int(timeRange.Minutes())
-		periodsInRange := int(timeRange.Minutes() / float64(resolution))
-
-		params := config.CommonQueryParams{
-			Series:    series,
-			Territory: territory,
-			Network:   network,
-			From:      timeFrom,
-			To:        timeTo,
-			Limit:     uint(limit),
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		var aggregate []config.ResultAggregateFields
-		//var total config.ResultCount
-		for i := 0; i < periodsInRange; i++ {
-			params.From = tF.Format("2006-01-02 15:04:05")
-			tF = tF.Add(time.Duration(resolution) * time.Minute)
-			params.To = tF.Format("2006-01-02 15:04:05")
-
-			aggregate, _ = socialHarvest.Database.FieldCounts(params, fields)
-			w.WriteJson(aggregate)
-			w.(http.ResponseWriter).Write([]byte("\n"))
-			// Flush the buffer to client immediately
-			// (for most cases, this stream will be quick and short - just how we like it. for the more crazy requests, it may take a little while and that's ok too)
-			w.(http.Flusher).Flush()
-		}
-	}
-}
-
-// Returns a simple count based on various conditions.
-func TerritoryCountData(w rest.ResponseWriter, r *rest.Request) {
-	res := setTerritoryLinks("territory:count")
-
-	territory := r.PathParam("territory")
-	series := r.PathParam("series")
-	field := r.PathParam("field")
-	queryParams := r.URL.Query()
-
-	timeFrom := ""
-	if len(queryParams["from"]) > 0 {
-		timeFrom = queryParams["from"][0]
-	}
-	timeTo := ""
-	if len(queryParams["to"]) > 0 {
-		timeTo = queryParams["to"][0]
-	}
-	fieldValue := ""
-	if len(queryParams["fieldValue"]) > 0 {
-		fieldValue = queryParams["fieldValue"][0]
-	}
-	network := ""
-	if len(queryParams["network"]) > 0 {
-		network = queryParams["network"][0]
-	}
-
-	params := config.CommonQueryParams{
-		Series:    series,
-		Territory: territory,
-		Field:     field,
-		Network:   network,
-		From:      timeFrom,
-		To:        timeTo,
-	}
-
-	var count config.ResultCount
-	count = socialHarvest.Database.Count(params, fieldValue)
-	res.Data["count"] = count.Count
-	res.Meta.From = count.TimeFrom
-	res.Meta.To = count.TimeTo
+	res.Data["configuredType"] = socialHarvest.Config.Database.Type
 
 	res.Success()
 	w.WriteJson(res.End())
-}
-
-// Returns a simple count based on various conditions in a streaming time series.
-func TerritoryTimeseriesCountData(w rest.ResponseWriter, r *rest.Request) {
-	territory := r.PathParam("territory")
-	series := r.PathParam("series")
-	field := r.PathParam("field")
-	queryParams := r.URL.Query()
-
-	timeFrom := ""
-	if len(queryParams["from"]) > 0 {
-		timeFrom = queryParams["from"][0]
-	}
-	timeTo := ""
-	if len(queryParams["to"]) > 0 {
-		timeTo = queryParams["to"][0]
-	}
-	fieldValue := ""
-	if len(queryParams["fieldValue"]) > 0 {
-		fieldValue = queryParams["fieldValue"][0]
-	}
-	network := ""
-	if len(queryParams["network"]) > 0 {
-		network = queryParams["network"][0]
-	}
-
-	params := config.CommonQueryParams{
-		Series:    series,
-		Territory: territory,
-		Field:     field,
-		Network:   network,
-		From:      timeFrom,
-		To:        timeTo,
-	}
-
-	// in minutes
-	resolution := 0
-	if len(queryParams["resolution"]) > 0 {
-		parsedResolution, err := strconv.Atoi(queryParams["resolution"][0])
-		if err == nil {
-			resolution = parsedResolution
-		}
-	}
-
-	if resolution != 0 && territory != "" && series != "" {
-		// only accepting days for now - not down to minutes or hours (yet)
-		tF, _ := time.Parse("2006-01-02", timeFrom)
-		tT, _ := time.Parse("2006-01-02", timeTo)
-
-		timeRange := tT.Sub(tF)
-		//totalRangeMinutes := int(timeRange.Minutes())
-		periodsInRange := int(timeRange.Minutes() / float64(resolution))
-
-		w.Header().Set("Content-Type", "application/json")
-		var count config.ResultCount
-		for i := 0; i < periodsInRange; i++ {
-			params.From = tF.Format("2006-01-02 15:04:05")
-			tF = tF.Add(time.Duration(resolution) * time.Minute)
-			params.To = tF.Format("2006-01-02 15:04:05")
-
-			count = socialHarvest.Database.Count(params, fieldValue)
-			w.WriteJson(count)
-			w.(http.ResponseWriter).Write([]byte("\n"))
-			// Flush the buffer to client immediately
-			// (for most cases, this stream will be quick and short - just how we like it. for the more crazy requests, it may take a little while and that's ok too)
-			w.(http.Flusher).Flush()
-		}
-	}
-
-}
-
-// API: Returns the messages (paginated) for a territory with the ability to filter by question or not, etc.
-func TerritoryMessages(w rest.ResponseWriter, r *rest.Request) {
-	res := setTerritoryLinks("territory:messages")
-
-	territory := r.PathParam("territory")
-	queryParams := r.URL.Query()
-
-	timeFrom := ""
-	if len(queryParams["from"]) > 0 {
-		timeFrom = queryParams["from"][0]
-	}
-	timeTo := ""
-	if len(queryParams["to"]) > 0 {
-		timeTo = queryParams["to"][0]
-	}
-	network := ""
-	if len(queryParams["network"]) > 0 {
-		network = queryParams["network"][0]
-	}
-	// Limit and Skip
-	limit := uint(100)
-	if len(queryParams["limit"]) > 0 {
-		l, lErr := strconv.ParseUint(queryParams["limit"][0], 10, 64)
-		if lErr == nil {
-			limit = uint(l)
-		}
-		if limit > 100 {
-			limit = 100
-		}
-		if limit < 1 {
-			limit = 1
-		}
-	}
-	skip := uint(0)
-	if len(queryParams["skip"]) > 0 {
-		sk, skErr := strconv.ParseUint(queryParams["skip"][0], 10, 64)
-		if skErr == nil {
-			skip = uint(sk)
-		}
-		if skip < 0 {
-			skip = 0
-		}
-	}
-	// Always passed as field,direction (dashes aren't allowed)
-	sort := "time,desc"
-	if len(queryParams["sort"]) > 0 {
-		sort = queryParams["sort"][0]
-	}
-
-	// Build the conditions
-	var conditions = config.MessageConditions{}
-
-	// For a LIKE% match (MongoDb regex)
-	if len(queryParams["search"]) > 0 {
-		conditions.Search = queryParams["search"][0]
-	}
-
-	// Condition for questions
-	if len(queryParams["questions"]) > 0 {
-		conditions.IsQuestion = 1
-	}
-	// Gender condition
-	if len(queryParams["gender"]) > 0 {
-		conditions.Gender = queryParams["gender"][0]
-	}
-	// Language condition
-	if len(queryParams["lang"]) > 0 {
-		conditions.Lang = queryParams["lang"][0]
-	}
-	// Country condition
-	if len(queryParams["country"]) > 0 {
-		conditions.Country = queryParams["country"][0]
-	}
-	// Geohash condition (nearby)
-	if len(queryParams["geohash"]) > 0 {
-		conditions.Geohash = queryParams["geohash"][0]
-	}
-
-	params := config.CommonQueryParams{
-		Series:    "messages",
-		Territory: territory,
-		Network:   network,
-		From:      timeFrom,
-		To:        timeTo,
-		Limit:     limit,
-		Skip:      skip,
-		Sort:      sort,
-	}
-
-	messages, total, skip, limit := socialHarvest.Database.Messages(params, conditions)
-	res.Data["messages"] = messages
-	res.Data["total"] = total
-	res.Data["limit"] = limit
-	res.Data["skip"] = skip
-
-	res.Success()
-	w.WriteJson(res.End())
-
 }
 
 // API: Territory list returns all currently configured territories and their settings
@@ -465,21 +189,6 @@ func setTerritoryLinks(self string) *config.HypermediaResource {
 	res.Links["territory:list"] = config.HypermediaLink{
 		Href: "/territory/list",
 	}
-	res.Links["territory:count"] = config.HypermediaLink{
-		Href: "/territory/count/{territory}/{series}/{field}{?from,to,network,fieldValue}",
-	}
-	res.Links["territory:timeseries-count"] = config.HypermediaLink{
-		Href: "/territory/timeseries/count/{territory}/{series}/{field}{?from,to,network,fieldValue}",
-	}
-	res.Links["territory:aggregate"] = config.HypermediaLink{
-		Href: "/territory/aggregate/{territory}/{series}{?from,to,network,fields}",
-	}
-	res.Links["territory:timeseries-aggregate"] = config.HypermediaLink{
-		Href: "/territory/timeseries/aggregate/{territory}/{series}{?from,to,network,fields,resolution}",
-	}
-	res.Links["territory:messages"] = config.HypermediaLink{
-		Href: "/territory/messages/{territory}{?from,to,limit,skip,network,lang,country,geohash,gender,questions,sort,search}",
-	}
 
 	selfedRes := config.NewHypermediaResource()
 	for link, _ := range res.Links {
@@ -490,38 +199,6 @@ func setTerritoryLinks(self string) *config.HypermediaResource {
 		}
 	}
 	return selfedRes
-}
-
-// --------- API: Utility end points ---------
-
-// Retrieves information to provide a summary about a give URL, specifically articles/blog posts.
-// TODO: Make this more robust (more details, videos, etc.). Some of this may eventually also go into the harvest.
-// TODO: Likely fork this package and add in some of the things I did for Virality Score in order to get even more data.
-func LinkDetails(w rest.ResponseWriter, r *rest.Request) {
-	res := config.NewHypermediaResource()
-	res.Links["self"] = config.HypermediaLink{
-		Href: "/link/details{?url}",
-	}
-
-	queryParams := r.URL.Query()
-	if len(queryParams["url"]) > 0 {
-		g := goose.New()
-		article := g.ExtractFromUrl(queryParams["url"][0])
-
-		res.Data["title"] = article.Title
-		res.Data["published"] = article.PublishDate
-		res.Data["favicon"] = article.MetaFavicon
-		res.Data["domain"] = article.Domain
-		res.Data["description"] = article.MetaDescription
-		res.Data["keywords"] = article.MetaKeywords
-		res.Data["content"] = article.CleanedText
-		res.Data["url"] = article.FinalUrl
-		res.Data["image"] = article.TopImage
-		res.Data["movies"] = article.Movies
-		res.Success()
-	}
-
-	w.WriteJson(res.End())
 }
 
 // --------- API Basic Auth Middleware (valid keys are defined in the Social Harvest config, there are no roles or anything)
@@ -548,7 +225,7 @@ func (bamw *BasicAuthMw) MiddlewareFunc(handler rest.HandlerFunc) rest.HandlerFu
 		}
 
 		keyFound := false
-		for _, key := range socialHarvest.Config.Server.AuthKeys {
+		for _, key := range socialHarvest.Config.HarvesterServer.AuthKeys {
 			if bamw.Key == key {
 				keyFound = true
 			}
@@ -572,7 +249,8 @@ func (bamw *BasicAuthMw) unauthorized(writer rest.ResponseWriter) {
 
 // Set the initial schedule entries from config SocialHarvestConf
 func setInitialSchedule() {
-
+	// NOTE: For now the schedule will always be set by an entire config reload, but in the future allowing the schedule to be updated without an entire config reload would be nice.
+	// TODO: ^^^^
 	for _, territory := range socialHarvest.Config.Harvest.Territories {
 		if territory.Schedule.Everything.Accounts != "" {
 			socialHarvest.Schedule.Cron.AddFunc(territory.Schedule.Everything.Accounts, HarvestAllAccounts, "Harvesting all accounts - "+territory.Schedule.Everything.Accounts)
@@ -580,8 +258,9 @@ func setInitialSchedule() {
 		if territory.Schedule.Everything.Content != "" {
 			socialHarvest.Schedule.Cron.AddFunc(territory.Schedule.Everything.Content, HarvestAllContent, "Harvesting all content - "+territory.Schedule.Everything.Content)
 		}
-
 	}
+
+	// Set cron tasks for creating partitions in Postgres
 }
 
 // Helper function to get the name of a function (primarily used to show scheduled tasks)
@@ -589,26 +268,31 @@ func getFunctionName(i interface{}) string {
 	return runtime.FuncForPC(reflect.ValueOf(i).Pointer()).Name()
 }
 
-// Main - initializes, configures, and sets routes for API
-func main() {
-	appVersion := "0.10.0-preview"
-
-	// Optionally allow a config JSON file to be passed via command line
-	var confFile string
-	flag.StringVar(&confFile, "conf", "social-harvest-conf.json", "Path to the Social Harvest configuration file.")
-	flag.Parse()
-
-	// Open the config JSON and decode it.
-	file, _ := os.Open(confFile)
-	decoder := json.NewDecoder(file)
-	configuration := config.SocialHarvestConf{}
-	err := decoder.Decode(&configuration)
-	if err != nil {
-		log.Println("error:", err)
+// Sets (or updates) the configuration for the application. If true is passed, then it won't look for an updated config in the "sh-data" path. The original config will be used instead.
+func setConfig(original bool) error {
+	var err error
+	var f *os.File
+	// First try to load the config file from the "sh-data" path where it would be if it was updated via the API. Unless the original config is to be loaded.
+	if !original {
+		f, err = os.Open("./sh-data/social-harvest-conf.json")
+		if !os.IsExist(err) {
+			// If that fails, go back to the original "confFile" path given at run time using the "--conf" flag (or the default value).
+			// In this case, the config may have been updated on disk and perhaps someone wanted to reload the config without restarting the application.
+			// Of course there is no reload config from the command line. This call must be made from the RESTful API for now.
+			f, err = os.Open(confFile)
+		}
+	} else {
+		f, err = os.Open(confFile)
 	}
 
-	// Set the configuration, DB client, etc. so that it is available to other stuff.
-	socialHarvest.Config = configuration
+	decoder := json.NewDecoder(f)
+	c := config.SocialHarvestConf{}
+	err = decoder.Decode(&c)
+	if err != nil {
+		log.Println("config decode error:", err)
+		return err
+	}
+	socialHarvest.Config = c
 
 	// Setup Bugsnag (first), profiling, etc.
 	if socialHarvest.Config.Debug.Bugsnag.ApiKey != "" {
@@ -618,6 +302,44 @@ func main() {
 			ProjectPackages: []string{"main", "github.com/SocialHarvest/harvester/*"},
 			AppVersion:      appVersion,
 		})
+	}
+
+	// Check the data directory, copy data needed by the harvester for various analysis of harvested data.
+	// Note: The data will only be copied if it doesn't exist already.
+	// TODO: Allow configuration to define this data and when that updates...new files get put into place.
+	config.CheckDataDir()
+	config.CopyTrainingData()
+
+	// Continue configuration
+	socialHarvest.Database = config.NewDatabase(socialHarvest.Config)
+	socialHarvest.Schedule = config.NewSchedule(socialHarvest.Config)
+
+	// this gets the configuration and the database. TODO: Make database optional
+	harvester.New(socialHarvest.Config, socialHarvest.Database)
+	// Load new gender data from CSV files for detecting gender (this is callable so it can be changed during runtime)
+	// TODO: Considerations with an asset system.
+	harvester.NewGenderData("./sh-data/census-female-names.csv", "./sh-data/census-male-names.csv")
+
+	// Set the initial schedule (can be changed via API if available)
+	setInitialSchedule()
+
+	return err
+}
+
+// Main - initializes, configures, and sets routes for API
+func main() {
+	// Optionally allow a config JSON file to be passed via command line
+	flag.StringVar(&confFile, "conf", "social-harvest-conf.json", "Path to the Social Harvest configuration file.")
+	flag.Parse()
+
+	// Set the configuration, DB client, etc. so that it is available to other stuff.
+	cErr := setConfig(false)
+	if cErr != nil {
+		log.Fatalln("Failed to load the harvester configuration.")
+	}
+	// NOTE: A database is optional for Social Harvest (harvested data can be logged for use with Fluentd for example)
+	if socialHarvest.Database.Postgres != nil {
+		defer socialHarvest.Database.Postgres.Close()
 	}
 
 	// Debug - do not compile with this
@@ -637,57 +359,37 @@ func main() {
 	color.Yellow("_____________________________________________version " + appVersion)
 	color.Cyan("   ")
 
-	// Continue configuration
-	socialHarvest.Database = config.NewDatabase(socialHarvest.Config)
-	// NOTE: A database is optional for Social Harvest (harvested data can be logged for use with Fluentd for example)
-	if socialHarvest.Database.Postgres != nil {
-		defer socialHarvest.Database.Postgres.Close()
-	}
-	socialHarvest.Schedule = config.NewSchedule(socialHarvest.Config)
-
-	// this gets the configuration and the database. TODO: Make database optional
-	harvester.New(socialHarvest.Config, socialHarvest.Database)
-	// Load new gender data from CSV files for detecting gender (this is callable so it can be changed during runtime)
-	// TODO: Think about being able to post more gender statistics via the API to add to the data set...
-	harvester.NewGenderData("data/census-female-names.csv", "data/census-male-names.csv")
-
-	// Set the initial schedule (can be changed via API if available)
-	setInitialSchedule()
-
 	// Immedate calls to use for testing during development
 	// Search Facebook public posts using keywords in Social Harvest config
-	//go FacebookPublicMessagesByKeyword()
-	// Search Facebook public feeds using account ids in Social Harvest config
-	//go FacebookMessagesByAccount()
-	// Search Twitter using keywords in Social Harvest config
-	//go TwitterPublicMessagesByKeyword()
-	//go TwitterPublicMessagesByAccount()
-	//  Search Instagram
-	//go InstagramMediaByKeyword()
-	//go GooglePlusActivitieByKeyword()
-	//go GooglePlusActivitieByAccount()
-	go HarvestAllContent()
-	//go HarvestAllAccounts()
+	// go FacebookPublicMessagesByKeyword()
+	// //Search Facebook public feeds using account ids in Social Harvest config
+	// go FacebookMessagesByAccount()
+	// //Search Twitter using keywords in Social Harvest config
+	// go TwitterPublicMessagesByKeyword()
+	// go TwitterPublicMessagesByAccount()
+	// // Search Instagram
+	// go InstagramMediaByKeyword()
+	// go GooglePlusActivitieByKeyword()
+	// go GooglePlusActivitieByAccount()
+	// go HarvestAllContent()
+	// go HarvestAllAccounts()
 
-	//harvester.YoutubeVideoSearch("obama")
-	///
+	//TODO: Continue with this...
+	//socialHarvest.Database.CreatePartitionTable("messages")
 
-	// The RESTful API server can be completely disabled by setting {"server":{"disabled": true}} in the config
-	// NOTE: If this is done, main() returns and that means the schedule will not be processed. This is typically
-	// for other packages that want to import Social Harvest. If a server is not desired, simply ensure whatever port
-	// Social Harvest runs on is has appropriate firewall settings. Alternatively, we could prevent main() from returning,
-	// but that would lead to a more confusing configuration.
-	// TODO: Think about accepting command line arguments for adhoc harvesting.
-	if !socialHarvest.Config.Server.Disabled {
+	// The RESTful API harvester server can be completely disabled by setting {"harvesterServer":{"disabled": true}} in the config.
+	// NOTE: The actual API server (if running) can not be updated (port changes, etc.) without the harvester application being restarted.
+	// TODO: Think about accepting command line arguments for adhoc harvesting (useful if the server is disabled because main() will return then).
+	if !socialHarvest.Config.HarvesterServer.Disabled {
 		restMiddleware := []rest.Middleware{}
 
 		// If additional origins were allowed for CORS, handle them
-		if len(socialHarvest.Config.Server.Cors.AllowedOrigins) > 0 {
+		if len(socialHarvest.Config.HarvesterServer.Cors.AllowedOrigins) > 0 {
 			restMiddleware = append(restMiddleware,
 				&rest.CorsMiddleware{
 					RejectNonCorsRequests: false,
 					OriginValidator: func(origin string, request *rest.Request) bool {
-						for _, allowedOrigin := range socialHarvest.Config.Server.Cors.AllowedOrigins {
+						for _, allowedOrigin := range socialHarvest.Config.HarvesterServer.Cors.AllowedOrigins {
 							// If the request origin matches one of the allowed origins, return true
 							if origin == allowedOrigin {
 								return true
@@ -704,10 +406,10 @@ func main() {
 			)
 		}
 		// If api keys are defined, setup basic auth (any key listed allows full access, there are no roles for now, this is just very basic auth)
-		if len(socialHarvest.Config.Server.AuthKeys) > 0 {
+		if len(socialHarvest.Config.HarvesterServer.AuthKeys) > 0 {
 			restMiddleware = append(restMiddleware,
 				&BasicAuthMw{
-					Realm: "Social Harvest API",
+					Realm: "Social Harvest (harvester) API",
 					Key:   "",
 				},
 			)
@@ -720,31 +422,22 @@ func main() {
 		err := handler.SetRoutes(
 			&rest.Route{"GET", "/schedule/read", ShowSchedule},
 			&rest.Route{"GET", "/config/read", ShowSocialHarvestConfig},
+			&rest.Route{"POST", "/config/write", WriteSocialHarvestConfig},
+			&rest.Route{"GET", "/config/reload", ReloadSocialHarvestConfig},
+			&rest.Route{"GET", "/database/info", DatabaseInfo},
 			&rest.Route{"GET", "/territory/list", TerritoryList},
-			// NOTE: The routes with "timeseries" are streams.
-			// Simple aggregates for a territory
-			//&rest.Route{"GET", "/territory/aggregate/:territory/:series", TerritoryAggregateData},
-			//&rest.Route{"GET", "/territory/timeseries/aggregate/:territory/:series", TerritoryTimeSeriesAggregateData},
-			// Simple counts for a territory
-			//&rest.Route{"GET", "/territory/count/:territory/:series/:field", TerritoryCountData},
-			//&rest.Route{"GET", "/territory/timeseries/count/:territory/:series/:field", TerritoryTimeseriesCountData},
-			// Messages for a territory
-			//&rest.Route{"GET", "/territory/messages/:territory", TerritoryMessages},
-
-			// A utility route to help get some details about any given external web page
-			&rest.Route{"GET", "/link/details", LinkDetails},
 		)
 		if err != nil {
 			log.Fatal(err)
 		}
 
 		// Allow the port to be configured (we need it as a string, but let the config define an int)
-		p := strconv.Itoa(socialHarvest.Config.Server.Port)
+		p := strconv.Itoa(socialHarvest.Config.HarvesterServer.Port)
 		// But if it can't be parsed (maybe wasn't set) then set it to 3000
 		if p == "0" {
 			p = "3000"
 		}
-		log.Println("Social Harvest API listening on port " + p)
+		log.Println("Social Harvest (harvester) API listening on port " + p)
 		if socialHarvest.Config.Debug.Bugsnag.ApiKey != "" {
 			log.Println(http.ListenAndServe(":"+p, bugsnag.Handler(&handler)))
 		} else {

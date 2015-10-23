@@ -4,6 +4,103 @@ Best efforts will be made to keep this up to date, but there are no guarantees b
 This file will log major feature advancements and bug fixes. Not quite everything will be noted (especially at first). 
 Please check GitHub issues.
 
+## 0.16.1 Alpha
+-------------
+
+The Twitter "anaconda" package had an update which caused a breaking change in the retrieval of status update location.
+
+
+## 0.16.0 Alpha
+-------------
+
+Unfortunately had to remove support for InfluxDB as a storage engine. InfluxDB is undergoing some major changes and 
+the client package has become unstable as a result (in terms of its API and breaking changes). Until InfluxDB is more 
+stable, it has been removed. It wasn't working well for analytics anyway and hopefully that will change as well.
+
+InfluxDB can still, of course, be used if setup through Fluentd. Fluentd can read log output from Social Harvest 
+in order to store data practically anywhere.
+
+## 0.15.0 Alpha
+-------------
+
+With the addition of sentiment analysis, Social Harvest (harvester) is now in a feature complete state. Very little, 
+in terms of API and schema for harvested data is expected to change between now and version 1.0. The first version 
+of Social Harvest is focusing on analyzing and monitoring a core set of social networks with internal tools. There 
+are no 3rd party APIs being used for geolocation, sentiment, or gender detection. This has prompted the "alpha" label.
+
+## 0.14.0
+-------------
+
+Adjusted the schema for several series. ```ContibutorState``` is now ```ContributorRegion``` because it can include more 
+then just a US state. It is the equivalent to "admin2 code" in the Geonames data set. ```ContributorCounty``` has been 
+removed. However, it may be added back in the future. The Geobed package can use yet another data set to decode id number 
+values to county names. However, it likely won't be added until needed (or until there's a better time to do so). This 
+does not affect plotted points on a map of course. The only benefit would be to group by county or fill a cloropleth 
+vector map (like those seen with D3.js). However, those are typically for US counties anyway. So it's limited. We can 
+also always get this kind of information after the fact given we have city, region, country.
+
+Also added city population to the series with city location information. This will allow for a whole new dimension in 
+reporting. It will now be possible to easily look at and aggregate data from major cities. It will also be possible to 
+filter out data from small cities.
+
+## 0.13.0
+-------------
+
+Removing depencency on external geocoding APIs. An in memory geodcoer (Geobed) is now used. This is also available as 
+a stand-alone package. The ```ContributorState``` field is now more of a state/province/"admin2 code" value. Different 
+data sets (Geonames/MaxMind) had different values so it's not strictly for US states anymore. The ```ContributorCounty``` 
+field is now not used. It can be in the future though should Geobed add that data set and do all the lookups. The general 
+consuses was that county is so rarely used (and could be figured out later anyway based on city, state/region, country).
+
+## 0.12.1
+-------------
+
+Fixing an issue with configuration where Postgres connection would be closed after configuring the database. It now will 
+be closed once the application exits (like before). Fixing a SQL create table script as well.
+
+Added an API endpoint to test the connection to the Postgres database. Will need to do the same for InfluxDB. 
+
+## 0.12.0
+-------------
+
+Lots of configuration enhancements.
+
+Data files (for gender detection, and in the future sentiment analysis) will now be downloaded and installed automatically. 
+This makes the installation process much easier for the harvester. It should really just be a matter of downloading a binary 
+(or clone from GitHub) and running it. Users won't need to go hunting down files and copying them to specific locations. 
+This will become a more robust asset system in the future (allowing for custom replacement data files).
+
+Configuration updates also go into this new ```sh-data``` directory. The harvester does not require a database. So the 
+configuration is stored in a JSON file (sure, could have been SQLite or something too). Many users will simply provide this 
+config file with each harvester server that they bring online in an automated fashion...But other users will want to change 
+the config through the harvester API and have it persist should the harvester crash and restart.
+
+Again, this will become a more robust system in the future because multiple harvesters will be at work in parallel and so 
+config updates will need to propagate out to all of those machines as well.
+
+Configuration can now be reloaded, reset, and managed via the harvester API. The application will also exit if there is no 
+JSON configuration file available. There must be, at least a minimal, config file.
+
+Also, the database config takes new ```retentionDays``` and ```partitionDays``` values. This helps the harvester with data 
+retention. InfluxDB automatically can expire old data, but in the future the harvester will use Postgres' PARTITION feature 
+to set partitions and then scheduled tasks will simply drop old tables outside this retention period. For now, only the 
+```retentionDays``` setting is used. If greater than 0, it will currently prevent older data from being stored. It is possible 
+for the harvester to pick up old data (sometimes months old) and this adds unnecessary strain on InfluxDB because soon after 
+the data is added, it's removed by the database. This can happen over and over and over. So this age check on data helps. 
+It's also going to help when using Postgres of course. Any gate keeping that prevents un-used data from being inserted helps.
+
+## 0.11.0
+-------------
+
+Now supporting InfluxDB again as a data store. InfluxDB has many features and advantages over Postgres for time series data. 
+Features include the ability to automatically remove data after an expiration date and many useful aggregation functions. 
+As a result, it will allow the API and dashboard to come together sooner. Postgres and InfluxDB will be the front-runners, 
+but additional database support may be added in the future.
+
+Additionally, the harvester will now only gather data. A separate reporter application will be responsible for getting the 
+data back out for front-end dashboards, etc. This keeps things better organized and allows the harvester to be a smaller binary. 
+It also lets the harvester scale without bringing with it a, perhaps, redundant and unused set of functionality.
+
 ## 0.10.0
 -------------
 

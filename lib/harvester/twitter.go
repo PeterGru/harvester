@@ -17,10 +17,9 @@
 package harvester
 
 import (
-	"github.com/ChimeraCoder/anaconda"
 	"github.com/SocialHarvest/harvester/lib/config"
-	geohash "github.com/TomiHiltunen/geohash-golang"
-	"github.com/tmaiaroto/geocoder"
+	"github.com/SocialHarvestVendors/anaconda"
+	geohash "github.com/SocialHarvestVendors/geohash-golang"
 	"log"
 	"net/url"
 	"strconv"
@@ -62,7 +61,7 @@ func NewTwitterTerritoryCredentials(territory string) {
 func TwitterSearch(territoryName string, harvestState config.HarvestState, query string, options url.Values) (url.Values, config.HarvestState) {
 	searchResults, _ := services.twitter.GetSearch(query, options)
 	// The cool thing about Twitter's API is that we have all the user data we need already. So we make less HTTP requests than when using Facebook's API.
-	for _, tweet := range searchResults {
+	for _, tweet := range searchResults.Statuses {
 		//log.Println(tweet)
 		//	log.Println("processing a tweet....")
 
@@ -82,37 +81,23 @@ func TwitterSearch(territoryName string, harvestState config.HarvestState, query
 			// TODO: figure out type somehow...
 			var contributorType = DetectContributorType(tweet.User.Name, contributorGender)
 
+			// While `tweet.Place.CountryCode` exists, city and state/region don't. So that doesn't help much. I suppose we could use it for supporting information send to the geocoder...
+			// But if the `tweet.User.Location` string already has a country code or name in there then I don't want to confuse it.
+			// I thought I'd be able to use more geo data from Twitter, but I guess not for now. Really happy the geocoder is now in memory.
 			var contributorCountry = ""
-			var contributorState = ""
+			var contributorRegion = ""
 			var contributorCity = ""
-			var contributorCounty = ""
+			var contributorCityPopulation = int32(0)
 
 			var statusLongitude = 0.0
 			var statusLatitude = 0.0
-			// TODO: is there a better way to do this? sheesh
-			switch coordMap := tweet.Coordinates.(type) {
-			case map[string]interface{}:
-				for k, v := range coordMap {
-					if k == "coordinates" {
-						switch coords := v.(type) {
-						case []interface{}:
-							for i, c := range coords {
-								switch cFloat := c.(type) {
-								case float64:
-									if i == 0 {
-										statusLongitude = cFloat
-									}
-									if i == 1 {
-										statusLatitude = cFloat
-									}
-									break
-								}
-							}
-						}
-
-					}
-				}
-				break
+			lng, errLng := tweet.Longitude()
+			if errLng == nil {
+				statusLongitude = lng
+			}
+			lat, errLat := tweet.Latitude()
+			if errLat == nil {
+				statusLatitude = lat
 			}
 
 			// Contributor location lookup (if no lat/lng was found on the message - try to reduce number of geocode lookups)
@@ -121,25 +106,23 @@ func TwitterSearch(territoryName string, harvestState config.HarvestState, query
 			if statusLatitude == 0.0 || statusLatitude == 0.0 {
 				// Do not make a request for nothing (there are no 1 character locations either).
 				if len(tweet.User.Location) > 1 {
-					location, err := geocoder.GeocodeLocation(tweet.User.Location)
-					if err == nil {
-						contributorLat = location.LatLng.Lat
-						contributorLng = location.LatLng.Lng
-						contributorState = location.State
-						contributorCity = location.City
-						contributorCountry = location.CountryCode
-						contributorCounty = location.County
-					}
+					location := services.geocoder.Geocode(tweet.User.Location)
+					contributorLat = location.Latitude
+					contributorLng = location.Longitude
+					contributorRegion = location.Region
+					contributorCity = location.City
+					contributorCityPopulation = location.Population
+					contributorCountry = location.Country
 				}
+
 				//contributorLat, contributorLng = Geocode(tweet.User.Location)
 			} else {
-				reverseLocation, geoErr := geocoder.ReverseGeocode(statusLatitude, statusLongitude)
-				if geoErr == nil {
-					contributorState = reverseLocation.State
-					contributorCity = reverseLocation.City
-					contributorCountry = reverseLocation.CountryCode
-					contributorCounty = reverseLocation.County
-				}
+				reverseLocation := services.geocoder.ReverseGeocode(statusLatitude, statusLongitude)
+				contributorRegion = reverseLocation.Region
+				contributorCity = reverseLocation.City
+				contributorCityPopulation = reverseLocation.Population
+				contributorCountry = reverseLocation.Country
+
 				// keep these, no need to change - might change accuracy, etc.
 				contributorLat = statusLatitude
 				contributorLng = statusLongitude
@@ -156,31 +139,32 @@ func TwitterSearch(territoryName string, harvestState config.HarvestState, query
 			harvestId := GetHarvestMd5(tweet.IdStr + "twitter" + territoryName)
 
 			message := config.SocialHarvestMessage{
-				Time:                     tweetCreatedTime,
-				HarvestId:                harvestId,
-				Territory:                territoryName,
-				Network:                  "twitter",
-				ContributorId:            tweet.User.IdStr,
-				ContributorScreenName:    tweet.User.ScreenName,
-				ContributorName:          tweet.User.Name,
-				ContributorLang:          tweet.User.Lang,
-				ContributorLongitude:     contributorLng,
-				ContributorLatitude:      contributorLat,
-				ContributorGeohash:       contributorLocationGeoHash,
-				ContributorCity:          contributorCity,
-				ContributorState:         contributorState,
-				ContributorCountry:       contributorCountry,
-				ContributorCounty:        contributorCounty,
-				ContributorVerified:      Btoi(tweet.User.Verified),
-				ContributorFollowers:     tweet.User.FollowersCount,
-				ContributorStatusesCount: int(tweet.User.StatusesCount),
-				ContributorGender:        contributorGender,
-				ContributorType:          contributorType,
-				Message:                  tweet.Text,
-				IsQuestion:               Btoi(IsQuestion(tweet.Text, harvestConfig.QuestionRegex)),
-				MessageId:                tweet.IdStr,
-				TwitterRetweetCount:      tweet.RetweetCount,
-				TwitterFavoriteCount:     tweet.FavoriteCount,
+				Time:                      tweetCreatedTime,
+				HarvestId:                 harvestId,
+				Territory:                 territoryName,
+				Network:                   "twitter",
+				ContributorId:             tweet.User.IdStr,
+				ContributorScreenName:     tweet.User.ScreenName,
+				ContributorName:           tweet.User.Name,
+				ContributorLang:           tweet.User.Lang,
+				ContributorLongitude:      contributorLng,
+				ContributorLatitude:       contributorLat,
+				ContributorGeohash:        contributorLocationGeoHash,
+				ContributorCity:           contributorCity,
+				ContributorCityPopulation: contributorCityPopulation,
+				ContributorRegion:         contributorRegion,
+				ContributorCountry:        contributorCountry,
+				ContributorVerified:       Btoi(tweet.User.Verified),
+				ContributorFollowers:      tweet.User.FollowersCount,
+				ContributorStatusesCount:  int(tweet.User.StatusesCount),
+				ContributorGender:         contributorGender,
+				ContributorType:           contributorType,
+				Message:                   tweet.Text,
+				Sentiment:                 services.sentimentAnalyzer.Classify(tweet.Text),
+				IsQuestion:                Btoi(IsQuestion(tweet.Text, harvestConfig.QuestionRegex)),
+				MessageId:                 tweet.IdStr,
+				TwitterRetweetCount:       tweet.RetweetCount,
+				TwitterFavoriteCount:      tweet.FavoriteCount,
 			}
 			go StoreHarvestedData(message)
 			LogJson(message, "messages")
@@ -197,25 +181,25 @@ func TwitterSearch(territoryName string, harvestState config.HarvestState, query
 
 						// Again, keyword share the same series/table/collection
 						hashtag := config.SocialHarvestHashtag{
-							Time:                  tweetCreatedTime,
-							HarvestId:             keywordHarvestId,
-							Territory:             territoryName,
-							Network:               "twitter",
-							MessageId:             tweet.IdStr,
-							ContributorId:         tweet.User.IdStr,
-							ContributorScreenName: tweet.User.ScreenName,
-							ContributorName:       tweet.User.Name,
-							ContributorLang:       tweet.User.Lang,
-							ContributorType:       contributorType,
-							ContributorGender:     contributorGender,
-							ContributorLongitude:  contributorLng,
-							ContributorLatitude:   contributorLat,
-							ContributorGeohash:    contributorLocationGeoHash,
-							ContributorCity:       contributorCity,
-							ContributorState:      contributorState,
-							ContributorCountry:    contributorCountry,
-							ContributorCounty:     contributorCounty,
-							Keyword:               keyword,
+							Time:                      tweetCreatedTime,
+							HarvestId:                 keywordHarvestId,
+							Territory:                 territoryName,
+							Network:                   "twitter",
+							MessageId:                 tweet.IdStr,
+							ContributorId:             tweet.User.IdStr,
+							ContributorScreenName:     tweet.User.ScreenName,
+							ContributorName:           tweet.User.Name,
+							ContributorLang:           tweet.User.Lang,
+							ContributorType:           contributorType,
+							ContributorGender:         contributorGender,
+							ContributorLongitude:      contributorLng,
+							ContributorLatitude:       contributorLat,
+							ContributorGeohash:        contributorLocationGeoHash,
+							ContributorCity:           contributorCity,
+							ContributorCityPopulation: contributorCityPopulation,
+							ContributorRegion:         contributorRegion,
+							ContributorCountry:        contributorCountry,
+							Keyword:                   keyword,
 						}
 						StoreHarvestedData(hashtag)
 						LogJson(hashtag, "hashtags")
@@ -235,27 +219,27 @@ func TwitterSearch(territoryName string, harvestState config.HarvestState, query
 						linkHostName = pUrl.Host
 
 						sharedLink := config.SocialHarvestSharedLink{
-							Time:                  tweetCreatedTime,
-							HarvestId:             sharedLinkHarvestId,
-							Territory:             territoryName,
-							Network:               "twitter",
-							MessageId:             tweet.IdStr,
-							ContributorId:         tweet.User.IdStr,
-							ContributorScreenName: tweet.User.ScreenName,
-							ContributorName:       tweet.User.Name,
-							ContributorLang:       tweet.User.Lang,
-							ContributorType:       contributorType,
-							ContributorGender:     contributorGender,
-							ContributorLongitude:  contributorLng,
-							ContributorLatitude:   contributorLat,
-							ContributorGeohash:    contributorLocationGeoHash,
-							ContributorCity:       contributorCity,
-							ContributorState:      contributorState,
-							ContributorCountry:    contributorCountry,
-							ContributorCounty:     contributorCounty,
-							Url:                   link.Url,
-							ExpandedUrl:           link.Expanded_url,
-							Host:                  linkHostName,
+							Time:                      tweetCreatedTime,
+							HarvestId:                 sharedLinkHarvestId,
+							Territory:                 territoryName,
+							Network:                   "twitter",
+							MessageId:                 tweet.IdStr,
+							ContributorId:             tweet.User.IdStr,
+							ContributorScreenName:     tweet.User.ScreenName,
+							ContributorName:           tweet.User.Name,
+							ContributorLang:           tweet.User.Lang,
+							ContributorType:           contributorType,
+							ContributorGender:         contributorGender,
+							ContributorLongitude:      contributorLng,
+							ContributorLatitude:       contributorLat,
+							ContributorGeohash:        contributorLocationGeoHash,
+							ContributorCity:           contributorCity,
+							ContributorCityPopulation: contributorCityPopulation,
+							ContributorRegion:         contributorRegion,
+							ContributorCountry:        contributorCountry,
+							Url:                       link.Url,
+							ExpandedUrl:               link.Expanded_url,
+							Host:                      linkHostName,
 						}
 						StoreHarvestedData(sharedLink)
 						LogJson(sharedLink, "shared_links")
@@ -274,29 +258,29 @@ func TwitterSearch(territoryName string, harvestState config.HarvestState, query
 						mediaHostName = pUrl.Host
 
 						sharedMedia := config.SocialHarvestSharedLink{
-							Time:                  tweetCreatedTime,
-							HarvestId:             sharedMediaHarvestId,
-							Territory:             territoryName,
-							Network:               "twitter",
-							MessageId:             tweet.IdStr,
-							ContributorId:         tweet.User.IdStr,
-							ContributorScreenName: tweet.User.ScreenName,
-							ContributorName:       tweet.User.Name,
-							ContributorLang:       tweet.User.Lang,
-							ContributorType:       contributorType,
-							ContributorGender:     contributorGender,
-							ContributorLongitude:  contributorLng,
-							ContributorLatitude:   contributorLat,
-							ContributorGeohash:    contributorLocationGeoHash,
-							ContributorCity:       contributorCity,
-							ContributorState:      contributorState,
-							ContributorCountry:    contributorCountry,
-							ContributorCounty:     contributorCounty,
-							Url:                   media.Url,
-							ExpandedUrl:           media.Expanded_url,
-							Host:                  mediaHostName,
-							Type:                  media.Type,
-							Source:                media.Media_url,
+							Time:                      tweetCreatedTime,
+							HarvestId:                 sharedMediaHarvestId,
+							Territory:                 territoryName,
+							Network:                   "twitter",
+							MessageId:                 tweet.IdStr,
+							ContributorId:             tweet.User.IdStr,
+							ContributorScreenName:     tweet.User.ScreenName,
+							ContributorName:           tweet.User.Name,
+							ContributorLang:           tweet.User.Lang,
+							ContributorType:           contributorType,
+							ContributorGender:         contributorGender,
+							ContributorLongitude:      contributorLng,
+							ContributorLatitude:       contributorLat,
+							ContributorGeohash:        contributorLocationGeoHash,
+							ContributorCity:           contributorCity,
+							ContributorCityPopulation: contributorCityPopulation,
+							ContributorRegion:         contributorRegion,
+							ContributorCountry:        contributorCountry,
+							Url:                       media.Url,
+							ExpandedUrl:               media.Expanded_url,
+							Host:                      mediaHostName,
+							Type:                      media.Type,
+							Source:                    media.Media_url,
 						}
 						StoreHarvestedData(sharedMedia)
 						LogJson(sharedMedia, "shared_links")
@@ -311,25 +295,25 @@ func TwitterSearch(territoryName string, harvestState config.HarvestState, query
 						hashtagHarvestId := GetHarvestMd5(tweet.IdStr + "twitter" + territoryName + tag.Text)
 
 						hashtag := config.SocialHarvestHashtag{
-							Time:                  tweetCreatedTime,
-							HarvestId:             hashtagHarvestId,
-							Territory:             territoryName,
-							Network:               "twitter",
-							MessageId:             tweet.IdStr,
-							ContributorId:         tweet.User.IdStr,
-							ContributorScreenName: tweet.User.ScreenName,
-							ContributorName:       tweet.User.Name,
-							ContributorLang:       tweet.User.Lang,
-							ContributorType:       contributorType,
-							ContributorGender:     contributorGender,
-							ContributorLongitude:  contributorLng,
-							ContributorLatitude:   contributorLat,
-							ContributorGeohash:    contributorLocationGeoHash,
-							ContributorCity:       contributorCity,
-							ContributorState:      contributorState,
-							ContributorCountry:    contributorCountry,
-							ContributorCounty:     contributorCounty,
-							Tag:                   tag.Text,
+							Time:                      tweetCreatedTime,
+							HarvestId:                 hashtagHarvestId,
+							Territory:                 territoryName,
+							Network:                   "twitter",
+							MessageId:                 tweet.IdStr,
+							ContributorId:             tweet.User.IdStr,
+							ContributorScreenName:     tweet.User.ScreenName,
+							ContributorName:           tweet.User.Name,
+							ContributorLang:           tweet.User.Lang,
+							ContributorType:           contributorType,
+							ContributorGender:         contributorGender,
+							ContributorLongitude:      contributorLng,
+							ContributorLatitude:       contributorLat,
+							ContributorGeohash:        contributorLocationGeoHash,
+							ContributorCity:           contributorCity,
+							ContributorCityPopulation: contributorCityPopulation,
+							ContributorRegion:         contributorRegion,
+							ContributorCountry:        contributorCountry,
+							Tag:                       tag.Text,
 						}
 						StoreHarvestedData(hashtag)
 						LogJson(hashtag, "hashtags")
@@ -405,36 +389,19 @@ func TwitterAccountStream(territoryName string, harvestState config.HarvestState
 			var contributorType = DetectContributorType(tweet.User.Name, contributorGender)
 
 			var contributorCountry = ""
-			var contributorState = ""
+			var contributorRegion = ""
 			var contributorCity = ""
-			var contributorCounty = ""
+			var contributorCityPopulation = int32(0)
 
 			var statusLongitude = 0.0
 			var statusLatitude = 0.0
-			// TODO: is there a better way to do this? sheesh
-			switch coordMap := tweet.Coordinates.(type) {
-			case map[string]interface{}:
-				for k, v := range coordMap {
-					if k == "coordinates" {
-						switch coords := v.(type) {
-						case []interface{}:
-							for i, c := range coords {
-								switch cFloat := c.(type) {
-								case float64:
-									if i == 0 {
-										statusLongitude = cFloat
-									}
-									if i == 1 {
-										statusLatitude = cFloat
-									}
-									break
-								}
-							}
-						}
-
-					}
-				}
-				break
+			lng, errLng := tweet.Longitude()
+			if errLng == nil {
+				statusLongitude = lng
+			}
+			lat, errLat := tweet.Latitude()
+			if errLat == nil {
+				statusLatitude = lat
 			}
 
 			// Contributor location lookup (if no lat/lng was found on the message - try to reduce number of geocode lookups)
@@ -443,25 +410,22 @@ func TwitterAccountStream(territoryName string, harvestState config.HarvestState
 			if statusLatitude == 0.0 || statusLatitude == 0.0 {
 				// Do not make a request for nothing (there are no 1 character locations either).
 				if len(tweet.User.Location) > 1 {
-					location, err := geocoder.GeocodeLocation(tweet.User.Location)
-					if err == nil {
-						contributorLat = location.LatLng.Lat
-						contributorLng = location.LatLng.Lng
-						contributorState = location.State
-						contributorCity = location.City
-						contributorCountry = location.CountryCode
-						contributorCounty = location.County
-					}
+					location := services.geocoder.Geocode(tweet.User.Location)
+					contributorLat = location.Latitude
+					contributorLng = location.Longitude
+					contributorRegion = location.Region
+					contributorCity = location.City
+					contributorCityPopulation = location.Population
+					contributorCountry = location.Country
 				}
 				//contributorLat, contributorLng = Geocode(tweet.User.Location)
 			} else {
-				reverseLocation, geoErr := geocoder.ReverseGeocode(statusLatitude, statusLongitude)
-				if geoErr == nil {
-					contributorState = reverseLocation.State
-					contributorCity = reverseLocation.City
-					contributorCountry = reverseLocation.CountryCode
-					contributorCounty = reverseLocation.County
-				}
+				reverseLocation := services.geocoder.ReverseGeocode(statusLatitude, statusLongitude)
+				contributorRegion = reverseLocation.Region
+				contributorCity = reverseLocation.City
+				contributorCityPopulation = reverseLocation.Population
+				contributorCountry = reverseLocation.Country
+
 				// keep these, no need to change - might change accuracy, etc.
 				contributorLat = statusLatitude
 				contributorLng = statusLongitude
@@ -478,31 +442,31 @@ func TwitterAccountStream(territoryName string, harvestState config.HarvestState
 			harvestId := GetHarvestMd5(tweet.IdStr + "twitter" + territoryName)
 
 			message := config.SocialHarvestMessage{
-				Time:                     tweetCreatedTime,
-				HarvestId:                harvestId,
-				Territory:                territoryName,
-				Network:                  "twitter",
-				ContributorId:            tweet.User.IdStr,
-				ContributorScreenName:    tweet.User.ScreenName,
-				ContributorName:          tweet.User.Name,
-				ContributorLang:          tweet.User.Lang,
-				ContributorLongitude:     contributorLng,
-				ContributorLatitude:      contributorLat,
-				ContributorGeohash:       contributorLocationGeoHash,
-				ContributorCity:          contributorCity,
-				ContributorState:         contributorState,
-				ContributorCountry:       contributorCountry,
-				ContributorCounty:        contributorCounty,
-				ContributorVerified:      Btoi(tweet.User.Verified),
-				ContributorFollowers:     tweet.User.FollowersCount,
-				ContributorStatusesCount: int(tweet.User.StatusesCount),
-				ContributorGender:        contributorGender,
-				ContributorType:          contributorType,
-				Message:                  tweet.Text,
-				IsQuestion:               Btoi(IsQuestion(tweet.Text, harvestConfig.QuestionRegex)),
-				MessageId:                tweet.IdStr,
-				TwitterRetweetCount:      tweet.RetweetCount,
-				TwitterFavoriteCount:     tweet.FavoriteCount,
+				Time:                      tweetCreatedTime,
+				HarvestId:                 harvestId,
+				Territory:                 territoryName,
+				Network:                   "twitter",
+				ContributorId:             tweet.User.IdStr,
+				ContributorScreenName:     tweet.User.ScreenName,
+				ContributorName:           tweet.User.Name,
+				ContributorLang:           tweet.User.Lang,
+				ContributorLongitude:      contributorLng,
+				ContributorLatitude:       contributorLat,
+				ContributorGeohash:        contributorLocationGeoHash,
+				ContributorCity:           contributorCity,
+				ContributorCityPopulation: contributorCityPopulation,
+				ContributorRegion:         contributorRegion,
+				ContributorCountry:        contributorCountry,
+				ContributorVerified:       Btoi(tweet.User.Verified),
+				ContributorFollowers:      tweet.User.FollowersCount,
+				ContributorStatusesCount:  int(tweet.User.StatusesCount),
+				ContributorGender:         contributorGender,
+				ContributorType:           contributorType,
+				Message:                   tweet.Text,
+				IsQuestion:                Btoi(IsQuestion(tweet.Text, harvestConfig.QuestionRegex)),
+				MessageId:                 tweet.IdStr,
+				TwitterRetweetCount:       tweet.RetweetCount,
+				TwitterFavoriteCount:      tweet.FavoriteCount,
 			}
 			// Send to the harvester observer
 			StoreHarvestedData(message)
@@ -521,27 +485,27 @@ func TwitterAccountStream(territoryName string, harvestState config.HarvestState
 
 						// TODO: ADD contributor gender, contributor type
 						sharedLink := config.SocialHarvestSharedLink{
-							Time:                  tweetCreatedTime,
-							HarvestId:             sharedLinkHarvestId,
-							Territory:             territoryName,
-							Network:               "twitter",
-							MessageId:             tweet.IdStr,
-							ContributorId:         tweet.User.IdStr,
-							ContributorScreenName: tweet.User.ScreenName,
-							ContributorName:       tweet.User.Name,
-							ContributorLang:       tweet.User.Lang,
-							ContributorType:       contributorType,
-							ContributorGender:     contributorGender,
-							ContributorLongitude:  contributorLng,
-							ContributorLatitude:   contributorLat,
-							ContributorGeohash:    contributorLocationGeoHash,
-							ContributorCity:       contributorCity,
-							ContributorState:      contributorState,
-							ContributorCountry:    contributorCountry,
-							ContributorCounty:     contributorCounty,
-							Url:                   link.Url,
-							ExpandedUrl:           link.Expanded_url,
-							Host:                  linkHostName,
+							Time:                      tweetCreatedTime,
+							HarvestId:                 sharedLinkHarvestId,
+							Territory:                 territoryName,
+							Network:                   "twitter",
+							MessageId:                 tweet.IdStr,
+							ContributorId:             tweet.User.IdStr,
+							ContributorScreenName:     tweet.User.ScreenName,
+							ContributorName:           tweet.User.Name,
+							ContributorLang:           tweet.User.Lang,
+							ContributorType:           contributorType,
+							ContributorGender:         contributorGender,
+							ContributorLongitude:      contributorLng,
+							ContributorLatitude:       contributorLat,
+							ContributorGeohash:        contributorLocationGeoHash,
+							ContributorCity:           contributorCity,
+							ContributorCityPopulation: contributorCityPopulation,
+							ContributorRegion:         contributorRegion,
+							ContributorCountry:        contributorCountry,
+							Url:                       link.Url,
+							ExpandedUrl:               link.Expanded_url,
+							Host:                      linkHostName,
 						}
 						// Send to the harvester observer
 						StoreHarvestedData(sharedLink)
@@ -562,29 +526,29 @@ func TwitterAccountStream(territoryName string, harvestState config.HarvestState
 
 						// TODO: ADD contributor gender, contributor type
 						sharedMedia := config.SocialHarvestSharedLink{
-							Time:                  tweetCreatedTime,
-							HarvestId:             sharedMediaHarvestId,
-							Territory:             territoryName,
-							Network:               "twitter",
-							MessageId:             tweet.IdStr,
-							ContributorId:         tweet.User.IdStr,
-							ContributorScreenName: tweet.User.ScreenName,
-							ContributorName:       tweet.User.Name,
-							ContributorLang:       tweet.User.Lang,
-							ContributorType:       contributorType,
-							ContributorGender:     contributorGender,
-							ContributorLongitude:  contributorLng,
-							ContributorLatitude:   contributorLat,
-							ContributorGeohash:    contributorLocationGeoHash,
-							ContributorCity:       contributorCity,
-							ContributorState:      contributorState,
-							ContributorCountry:    contributorCountry,
-							ContributorCounty:     contributorCounty,
-							Url:                   media.Url,
-							ExpandedUrl:           media.Expanded_url,
-							Host:                  mediaHostName,
-							Type:                  media.Type,
-							Source:                media.Media_url,
+							Time:                      tweetCreatedTime,
+							HarvestId:                 sharedMediaHarvestId,
+							Territory:                 territoryName,
+							Network:                   "twitter",
+							MessageId:                 tweet.IdStr,
+							ContributorId:             tweet.User.IdStr,
+							ContributorScreenName:     tweet.User.ScreenName,
+							ContributorName:           tweet.User.Name,
+							ContributorLang:           tweet.User.Lang,
+							ContributorType:           contributorType,
+							ContributorGender:         contributorGender,
+							ContributorLongitude:      contributorLng,
+							ContributorLatitude:       contributorLat,
+							ContributorGeohash:        contributorLocationGeoHash,
+							ContributorCity:           contributorCity,
+							ContributorCityPopulation: contributorCityPopulation,
+							ContributorRegion:         contributorRegion,
+							ContributorCountry:        contributorCountry,
+							Url:                       media.Url,
+							ExpandedUrl:               media.Expanded_url,
+							Host:                      mediaHostName,
+							Type:                      media.Type,
+							Source:                    media.Media_url,
 						}
 						// Send to the harvester observer
 						StoreHarvestedData(sharedMedia)
@@ -601,25 +565,25 @@ func TwitterAccountStream(territoryName string, harvestState config.HarvestState
 
 						// TODO: ADD contributor gender, contributor type
 						hashtag := config.SocialHarvestHashtag{
-							Time:                  tweetCreatedTime,
-							HarvestId:             hashtagHarvestId,
-							Territory:             territoryName,
-							Network:               "twitter",
-							MessageId:             tweet.IdStr,
-							ContributorId:         tweet.User.IdStr,
-							ContributorScreenName: tweet.User.ScreenName,
-							ContributorName:       tweet.User.Name,
-							ContributorLang:       tweet.User.Lang,
-							ContributorType:       contributorType,
-							ContributorGender:     contributorGender,
-							ContributorLongitude:  contributorLng,
-							ContributorLatitude:   contributorLat,
-							ContributorGeohash:    contributorLocationGeoHash,
-							ContributorCity:       contributorCity,
-							ContributorState:      contributorState,
-							ContributorCountry:    contributorCountry,
-							ContributorCounty:     contributorCounty,
-							Tag:                   tag.Text,
+							Time:                      tweetCreatedTime,
+							HarvestId:                 hashtagHarvestId,
+							Territory:                 territoryName,
+							Network:                   "twitter",
+							MessageId:                 tweet.IdStr,
+							ContributorId:             tweet.User.IdStr,
+							ContributorScreenName:     tweet.User.ScreenName,
+							ContributorName:           tweet.User.Name,
+							ContributorLang:           tweet.User.Lang,
+							ContributorType:           contributorType,
+							ContributorGender:         contributorGender,
+							ContributorLongitude:      contributorLng,
+							ContributorLatitude:       contributorLat,
+							ContributorGeohash:        contributorLocationGeoHash,
+							ContributorCity:           contributorCity,
+							ContributorCityPopulation: contributorCityPopulation,
+							ContributorRegion:         contributorRegion,
+							ContributorCountry:        contributorCountry,
+							Tag:                       tag.Text,
 						}
 						// Send to the harvester observer
 						StoreHarvestedData(hashtag)

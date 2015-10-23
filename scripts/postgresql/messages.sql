@@ -29,6 +29,7 @@ CREATE TABLE "messages" (
 	"contributor_listed_count" int4,
 	"contributor_followers" int4,
 	"contributor_verified" int2,
+	"sentiment" int2,
 	"is_question" int2,
 	"category" varchar(100) COLLATE "default",
 	"twitter_retweet_count" int4,
@@ -38,8 +39,8 @@ CREATE TABLE "messages" (
 	"google_plus_ones" int4,
 	"contributor_country" varchar(6) COLLATE "default",
 	"contributor_city" varchar(75) COLLATE "default",
-	"contributor_state" varchar(50) COLLATE "default",
-	"contributor_county" varchar(75) COLLATE "default"
+	"contributor_city_pop" int4,
+	"contributor_region" varchar(50) COLLATE "default"
 )
 WITH (OIDS=FALSE);
 

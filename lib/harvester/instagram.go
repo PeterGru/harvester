@@ -20,9 +20,8 @@ import (
 	//"encoding/json"
 	"bytes"
 	"github.com/SocialHarvest/harvester/lib/config"
-	geohash "github.com/TomiHiltunen/geohash-golang"
-	"github.com/carbocation/go-instagram/instagram"
-	"github.com/tmaiaroto/geocoder"
+	geohash "github.com/SocialHarvestVendors/geohash-golang"
+	"github.com/SocialHarvestVendors/go-instagram/instagram"
 	"log"
 	"net"
 	"net/http"
@@ -101,9 +100,9 @@ func InstagramSearch(territoryName string, harvestState config.HarvestState, tag
 				var contributorType = DetectContributorType(item.User.FullName, contributorGender)
 
 				var contributorCountry = ""
-				var contributorState = ""
+				var contributorRegion = ""
 				var contributorCity = ""
-				var contributorCounty = ""
+				var contributorCityPopulation = int32(0)
 
 				var statusLongitude = 0.0
 				var statusLatitude = 0.0
@@ -116,13 +115,12 @@ func InstagramSearch(territoryName string, harvestState config.HarvestState, tag
 				contributorLat := 0.0
 				contributorLng := 0.0
 				if statusLatitude != 0.0 && statusLatitude != 0.0 {
-					reverseLocation, geoErr := geocoder.ReverseGeocode(statusLatitude, statusLongitude)
-					if geoErr == nil {
-						contributorState = reverseLocation.State
-						contributorCity = reverseLocation.City
-						contributorCountry = reverseLocation.CountryCode
-						contributorCounty = reverseLocation.County
-					}
+					reverseLocation := services.geocoder.ReverseGeocode(statusLatitude, statusLongitude)
+					contributorRegion = reverseLocation.Region
+					contributorCity = reverseLocation.City
+					contributorCityPopulation = reverseLocation.Population
+					contributorCountry = reverseLocation.Country
+
 					// They don't provide user location of any sort, so use the status lat/lng.
 					contributorLat = statusLatitude
 					contributorLng = statusLongitude
@@ -155,28 +153,29 @@ func InstagramSearch(territoryName string, harvestState config.HarvestState, tag
 				}
 
 				message := config.SocialHarvestMessage{
-					Time:                     instagramCreatedTime,
-					HarvestId:                harvestId,
-					Territory:                territoryName,
-					Network:                  "instagram",
-					ContributorId:            item.User.ID,
-					ContributorScreenName:    item.User.Username,
-					ContributorName:          item.User.FullName,
-					ContributorLongitude:     contributorLng,
-					ContributorLatitude:      contributorLat,
-					ContributorGeohash:       contributorLocationGeoHash,
-					ContributorCity:          contributorCity,
-					ContributorState:         contributorState,
-					ContributorCountry:       contributorCountry,
-					ContributorCounty:        contributorCounty,
-					ContributorFollowers:     contributorFollowedByCount,
-					ContributorStatusesCount: contributorMediaCount,
-					ContributorGender:        contributorGender,
-					ContributorType:          contributorType,
-					Message:                  caption,
-					IsQuestion:               isQuestion,
-					MessageId:                item.ID,
-					LikeCount:                item.Likes.Count,
+					Time:                      instagramCreatedTime,
+					HarvestId:                 harvestId,
+					Territory:                 territoryName,
+					Network:                   "instagram",
+					ContributorId:             item.User.ID,
+					ContributorScreenName:     item.User.Username,
+					ContributorName:           item.User.FullName,
+					ContributorLongitude:      contributorLng,
+					ContributorLatitude:       contributorLat,
+					ContributorGeohash:        contributorLocationGeoHash,
+					ContributorCity:           contributorCity,
+					ContributorCityPopulation: contributorCityPopulation,
+					ContributorRegion:         contributorRegion,
+					ContributorCountry:        contributorCountry,
+					ContributorFollowers:      contributorFollowedByCount,
+					ContributorStatusesCount:  contributorMediaCount,
+					ContributorGender:         contributorGender,
+					ContributorType:           contributorType,
+					Message:                   caption,
+					Sentiment:                 services.sentimentAnalyzer.Classify(caption),
+					IsQuestion:                isQuestion,
+					MessageId:                 item.ID,
+					LikeCount:                 item.Likes.Count,
 				}
 				// Send to the harvester observer
 				go StoreHarvestedData(message)
@@ -192,24 +191,24 @@ func InstagramSearch(territoryName string, harvestState config.HarvestState, tag
 
 							// Again, keyword share the same series/table/collection
 							hashtag := config.SocialHarvestHashtag{
-								Time:                  instagramCreatedTime,
-								HarvestId:             keywordHarvestId,
-								Territory:             territoryName,
-								Network:               "instagram",
-								MessageId:             item.ID,
-								ContributorId:         item.User.ID,
-								ContributorScreenName: item.User.Username,
-								ContributorName:       item.User.FullName,
-								ContributorLongitude:  contributorLng,
-								ContributorLatitude:   contributorLat,
-								ContributorGeohash:    contributorLocationGeoHash,
-								ContributorCity:       contributorCity,
-								ContributorState:      contributorState,
-								ContributorCountry:    contributorCountry,
-								ContributorCounty:     contributorCounty,
-								ContributorGender:     contributorGender,
-								ContributorType:       contributorType,
-								Keyword:               keyword,
+								Time:                      instagramCreatedTime,
+								HarvestId:                 keywordHarvestId,
+								Territory:                 territoryName,
+								Network:                   "instagram",
+								MessageId:                 item.ID,
+								ContributorId:             item.User.ID,
+								ContributorScreenName:     item.User.Username,
+								ContributorName:           item.User.FullName,
+								ContributorLongitude:      contributorLng,
+								ContributorLatitude:       contributorLat,
+								ContributorGeohash:        contributorLocationGeoHash,
+								ContributorCity:           contributorCity,
+								ContributorCityPopulation: contributorCityPopulation,
+								ContributorRegion:         contributorRegion,
+								ContributorCountry:        contributorCountry,
+								ContributorGender:         contributorGender,
+								ContributorType:           contributorType,
+								Keyword:                   keyword,
 							}
 							StoreHarvestedData(hashtag)
 							LogJson(hashtag, "hashtags")
@@ -236,29 +235,29 @@ func InstagramSearch(territoryName string, harvestState config.HarvestState, tag
 				}
 
 				sharedLink := config.SocialHarvestSharedLink{
-					Time:                  instagramCreatedTime,
-					HarvestId:             harvestId,
-					Territory:             territoryName,
-					Network:               "instagram",
-					MessageId:             item.ID,
-					ContributorId:         item.User.ID,
-					ContributorScreenName: item.User.Username,
-					ContributorName:       item.User.FullName,
-					ContributorLongitude:  contributorLng,
-					ContributorLatitude:   contributorLat,
-					ContributorGeohash:    contributorLocationGeoHash,
-					ContributorCity:       contributorCity,
-					ContributorState:      contributorState,
-					ContributorCountry:    contributorCountry,
-					ContributorCounty:     contributorCounty,
-					ContributorGender:     contributorGender,
-					ContributorType:       contributorType,
-					Url:                   item.Link,
-					ExpandedUrl:           item.Link,
-					Host:                  linkHostName,
-					Type:                  item.Type,
-					Preview:               preview,
-					Source:                source,
+					Time:                      instagramCreatedTime,
+					HarvestId:                 harvestId,
+					Territory:                 territoryName,
+					Network:                   "instagram",
+					MessageId:                 item.ID,
+					ContributorId:             item.User.ID,
+					ContributorScreenName:     item.User.Username,
+					ContributorName:           item.User.FullName,
+					ContributorLongitude:      contributorLng,
+					ContributorLatitude:       contributorLat,
+					ContributorGeohash:        contributorLocationGeoHash,
+					ContributorCity:           contributorCity,
+					ContributorCityPopulation: contributorCityPopulation,
+					ContributorRegion:         contributorRegion,
+					ContributorCountry:        contributorCountry,
+					ContributorGender:         contributorGender,
+					ContributorType:           contributorType,
+					Url:                       item.Link,
+					ExpandedUrl:               item.Link,
+					Host:                      linkHostName,
+					Type:                      item.Type,
+					Preview:                   preview,
+					Source:                    source,
 				}
 				// Send to the harvester observer
 				StoreHarvestedData(sharedLink)
@@ -272,24 +271,24 @@ func InstagramSearch(territoryName string, harvestState config.HarvestState, tag
 
 							// TODO: ADD contributor gender, contributor type
 							hashtag := config.SocialHarvestHashtag{
-								Time:                  instagramCreatedTime,
-								HarvestId:             hashtagHarvestId,
-								Territory:             territoryName,
-								Network:               "instagram",
-								MessageId:             item.ID,
-								ContributorId:         item.User.ID,
-								ContributorScreenName: item.User.Username,
-								ContributorName:       item.User.FullName,
-								ContributorLongitude:  contributorLng,
-								ContributorLatitude:   contributorLat,
-								ContributorGeohash:    contributorLocationGeoHash,
-								ContributorCity:       contributorCity,
-								ContributorState:      contributorState,
-								ContributorCountry:    contributorCountry,
-								ContributorCounty:     contributorCounty,
-								ContributorGender:     contributorGender,
-								ContributorType:       contributorType,
-								Tag:                   tag,
+								Time:                      instagramCreatedTime,
+								HarvestId:                 hashtagHarvestId,
+								Territory:                 territoryName,
+								Network:                   "instagram",
+								MessageId:                 item.ID,
+								ContributorId:             item.User.ID,
+								ContributorScreenName:     item.User.Username,
+								ContributorName:           item.User.FullName,
+								ContributorLongitude:      contributorLng,
+								ContributorLatitude:       contributorLat,
+								ContributorGeohash:        contributorLocationGeoHash,
+								ContributorCity:           contributorCity,
+								ContributorCityPopulation: contributorCityPopulation,
+								ContributorRegion:         contributorRegion,
+								ContributorCountry:        contributorCountry,
+								ContributorGender:         contributorGender,
+								ContributorType:           contributorType,
+								Tag:                       tag,
 							}
 							// Send to the harvester observer
 							StoreHarvestedData(hashtag)
